@@ -1,0 +1,972 @@
+---
+title: "controls_allCOF"
+author: "Xiao Sun"
+date: "2024-01-07"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r library}
+library(tidyverse) # Modern data science library. for everything (data manipulation, visualization, coding, and more) 
+library(plm)       # Panel data analysis library
+require(car)       # Companion to applied regression.  # vif 
+library(gplots)    # Various programing tools for plotting data # plotmeans
+library(tseries)   # For timeseries analysis
+library(lmtest)    # For hetoroskedasticity analysis
+library(ggplot2)
+library(dplyr)
+library(tinytex)
+library(stargazer)
+library(data.table)
+library(lme4)       # linear mixed-effects models
+library(lmerTest)   # test for linear mixed-effects models # ranova(m0)
+library(readxl)
+library(MASS)
+library(jtools) # results of (primarily) regression analyse, summ()
+library(sjPlot) # mixed-effects table
+
+
+#library(labelled)   # labeling data
+#library(rstatix)    # summary statistics
+#library(ggpubr)     # convenient summary statistics and plots
+#library(GGally)     # advanced plot
+#library(car)        # useful for anova/wald test
+#library(Epi)        # easy getting CI for model coef/pred
+#library(emmeans)    # marginal means
+#library(multcomp)   # CI for linear combinations of model coef
+#library(geepack)    # generalized estimating equations
+#library(ggeffects)  # marginal effects, adjusted predictions
+#library(gt)         # nice tables
+
+theme_set(theme_minimal() + theme(legend.position = "bottom")) # theme for ggplot
+```
+
+# note:
+COF with two controls: lag_log_OECD + lag_log_ADB_Loans
+
+
+# data
+
+```{r clean data, echo = FALSE, results = "asis", message=FALSE, Warning=FALSE, comment = FALSE}
+# load data
+data <- read_excel("New China - ASEAN data (12.10.23).xlsx")
+dt <- filter(data, !Country %in% c("Singapore")) # exclude Singapore due to lack of the DV, ODA
+
+# data logarithmic transformations of economic-relevant values
+## +1 is to avoid negative infinity because the dataset contains 0 values for some variables, when log(0) will get negative infinity
+dt$log_GDPpc <- log(dt$GDP_Capita)
+dt$log_ODA <- log(dt$ODA_Million+1)
+dt$log_OECD <- log(dt$OECD_DAC+1)
+dt$log_ODAOOF <- log(dt$ODA_OOF+1)
+dt$log_OFALL <- log(dt$Offi_Fin_All+1)
+
+dt$log_Pop <- log(dt$Population+1)
+dt$log_AIIB_Loans <- log(dt$AIIB_Loans_Total+1)
+dt$log_BRI_Const_Invest <- log(dt$AEI_BRI_Total+1) 
+dt$log_ADB_Loans <- log(dt$ADB_Loans+1)
+
+```
+
+
+```{r clean data, echo = FALSE, results = "asis", message=FALSE, Warning=FALSE, comment = FALSE}
+# lagging variables
+## assumption: the previous year's values of IVs (t-1) can affect the current year's DV (t): ODA
+
+### get the names of the variables needed lag
+vars_to_lag <- c("Imp.Percent.CN", "Exp.Percent.CN", "AIIB_Member","BRI_Member", "log_ADB_Loans", "log_AIIB_Loans", "log_BRI_Const_Invest", "UNSC", "log_GDPpc",  "log_OECD", "Dispute", "Resolution", "log_ODA","log_Pop", "Civil_Conflict", "Law", "Lib_Dem", "Poly") # discuss which should lag
+
+### Lag variables by Country and Year
+### The LEAD function is used to access data from SUBSEQUENT rows along with data from the current row. The LAG function is used to access data from PREVIOUS rows along with data from the current row.
+
+dtlag <- dt %>%
+  group_by(Country) %>%
+  arrange(Year) %>%
+  mutate(across(all_of(vars_to_lag), ~dplyr::lag(.))) %>%
+  ungroup() %>%
+  mutate(across(all_of(vars_to_lag))) %>%
+  rename_with(~paste0("lag_", .), all_of(vars_to_lag))
+
+### names of non-lagged variables
+vars_not_lag <- c("Imp.Lead", "Exp.Lead", "Oth.Imp.Pct", "Oth.Imp.Coun", "Oth.Exp.Pct","ODA_OOF","Offi_Fin_All", "Oth.Exp.Coun","Clash", "Pub.Stat", "Intl.Arb", "ODA_Million", "Negotiations", "NBTP", "Arbitration", "Adjudication", "Land_Border", "SCS_Border", "SCS_Features", "FDI_In", "CFR_debt_ratio", "CFR_Ch_FDI", "CFR_imports", "AIIB_Loans_sovereign", "AEI_BRI_construction", "GDP_Capita",  "ADB_Loans", "AEI_BRI_investment", "OECD_DAC", "Population",  "ADB_Member",  "log_ADB_Loans")
+
+### Combine lagged variables to the original dataframe
+dt_all <- dt %>%
+   dplyr::select(-all_of(vars_to_lag), -all_of(vars_not_lag)) %>%
+  left_join(dtlag, by = c("Country", "Year"))
+
+### log_ODA disappeared. so I add it from dt dataset again
+dt_all$log_ODA <- log(dt$ODA_Million+1)
+dt_all$log_ODAOOF <- log(dt$ODA_OOF+1)
+dt_all$log_OFALL <- log(dt$Offi_Fin_All+1)
+```
+
+```{r}
+# a new dataset only contains the necessary variables (for later omit NAs)  
+## note: plus SCS_Border, SCS_Features
+df <- dt_all %>%  dplyr::select("Country","Year", "log_ODA", "ODA_Million", "lag_log_OECD", "log_ODAOOF", "ODA_OOF", "log_OFALL", "lag_log_ADB_Loans", "Offi_Fin_All","lag_Imp.Percent.CN", "lag_Exp.Percent.CN", "lag_Resolution", "lag_Dispute", "lag_AIIB_Member", "lag_BRI_Member","lag_UNSC", "lag_log_GDPpc",  "lag_log_Pop", "lag_Civil_Conflict", "lag_Law", "SCS_Border", "SCS_Features")
+```
+
+# Explore data distribution
+
+## COF trend by individual countries over time
+
+```{r, echo = FALSE, results = "asis", message=FALSE, Warning=FALSE, comment = FALSE}
+#check distribution of Offi_Fin_All
+df %>% 
+  ggplot(aes(x= Year, y = Offi_Fin_All, colour = Country)) + 
+  geom_line() +
+  ylab("COF (US$ Million)") +
+  facet_wrap(~Country)
+```
+
+```{r, echo = FALSE, results = "asis", message=FALSE, Warning=FALSE, comment = FALSE}
+#check distribution of log Offi_Fin_All
+df %>% 
+  ggplot(aes(x= Year, y = log_OFALL, colour = Country)) + 
+  geom_line() +
+  ylab("Logged COF (US$ Million)") +
+  facet_wrap(~Country)
+```
+
+# decriptive statistics
+
+log_OFALL ~ lag_Imp.Percent.CN + lag_Exp.Percent.CN + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict + lag_log_OECD + lag_log_ADB_Loans
+lag_BRI_Member + lag_AIIB_Member
+
+lag_Dispute + lag_Resolution
+
+```{r}
+library(huxtable)
+library(psych)
+summary_stats <- summary(df[, c("log_OFALL", "lag_Imp.Percent.CN", "lag_Exp.Percent.CN", "lag_Dispute", "lag_Resolution", "lag_BRI_Member", "lag_AIIB_Member", "lag_UNSC", "lag_log_GDPpc", "lag_log_Pop", "lag_Civil_Conflict", "lag_log_OECD", "lag_log_ADB_Loans")]) 
+
+describe_stats <- describe(df[, c("log_OFALL", "lag_Imp.Percent.CN", "lag_Exp.Percent.CN", "lag_Dispute", "lag_Resolution", "lag_BRI_Member", "lag_AIIB_Member", "lag_UNSC", "lag_log_GDPpc", "lag_log_Pop", "lag_Civil_Conflict", "lag_log_OECD", "lag_log_ADB_Loans")]) 
+
+summary_table <- as_hux(summary_stats)
+describe_table <- as_hux(describe_stats)
+
+summary_table <- set_all_borders(summary_table, 0.4)
+describe_table <- set_all_borders(describe_table, 0.4)
+
+summary_table
+describe_table
+
+```
+
+
+## Heterogeneity across countries
+
+Plot group means and confidence intervals.
+
+```{r, warning=FALSE}
+# 
+plotmeans(Offi_Fin_All ~ Country,  ylab = "COF (US$ Million)", data=df)
+
+# main="COF means across countries"
+
+#  plotmeans draw a 95% confidence interval around the means
+```
+## Heterogeneity across years
+```{r, warning=FALSE}
+# log ODA&OOF 
+plotmeans(Offi_Fin_All~ Year, ylab = "COF (US$ Million)", data=df)
+#  main="ODA&OOF means across years",
+## plotmeans draw a 95% confidence interval around the means
+```
+
+
+# Multicollinearity check vif (Variance Inflation Factor) 
+
+The value for VIF starts at 1 and has no upper limit. A general rule of thumb for interpreting VIFs is as follows:
+
+A value of 1 indicates there is no correlation between a given predictor variable and any other predictor variables in the model.
+A value between 1 and 5 indicates moderate correlation between a given predictor variable and other predictor variables in the model, but this is often not severe enough to require attention.
+A value greater than 5 indicates potentially severe correlation between a given predictor variable and other predictor variables in the model. In this case, the coefficient estimates and p-values in the regression output are likely unreliable.
+
+## OLS
+
+drop lag_Law because its vif is higehr than 5.
+```{r}
+pool_trade <- lm(log_OFALL ~ lag_Imp.Percent.CN + lag_Exp.Percent.CN + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict + lag_log_OECD + lag_log_ADB_Loans, data = df) # baseline # drop  SCS_Border + SCS_Features
+summary(pool_trade)
+```
+#### Trade VIF
+```{r}
+#create vector of VIF values
+vif(pool_trade)
+vif_values <- vif(pool_trade)
+#create horizontal bar chart to display each VIF value
+barplot(vif_values, main = "VIF Values", horiz = TRUE, col = "steelblue", xlim = c(0,6))
+#add vertical line at 5
+abline(v = 5, lwd = 3, lty = 2)
+```
+#### dispute VIF
+```{r}
+pool_disp <- lm(log_OFALL ~ lag_Dispute + lag_Resolution + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict + lag_log_OECD + lag_log_ADB_Loans, data = df) # + SCS_Border + SCS_Features
+summary(pool_disp)
+```
+
+```{r}
+#create vector of VIF values
+vif(pool_disp)
+vif_values <- vif(pool_disp)
+#create horizontal bar chart to display each VIF value
+barplot(vif_values, main = "VIF Values", horiz = TRUE, col = "steelblue", xlim = c(0,6))
+#add vertical line at 5
+abline(v = 5, lwd = 3, lty = 2)
+```
+#### Institutions
+```{r}
+pool_ins1 <- lm(log_OFALL ~ lag_BRI_Member + lag_AIIB_Member + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict + lag_log_OECD + lag_log_ADB_Loans, data = df) # + SCS_Border + SCS_Features
+summary(pool_ins1)
+```
+
+```{r}
+#create vector of VIF values
+vif(pool_ins1)
+vif_values <- vif(pool_ins1)
+#create horizontal bar chart to display each VIF value
+barplot(vif_values, main = "VIF Values", horiz = TRUE, col = "steelblue", xlim = c(0,6))
+#add vertical line at 5
+abline(v = 5, lwd = 3, lty = 2)
+```
+
+# base-line model (without predictors)
+null model, which only has the intercept and the random effect. T
+The first Percent of the formula model specify the fixed effects Percent of the model, while the second in parantheses specify the random components.
+
+we have created the base-line models, we will test whether including a random effect structure is mathematically justified.
+```{r}
+m0 <- lmer(log_OFALL~ 1 + (1 | Country), data = df, REML = FALSE) # REML = FALSE, fit by maximum likelihood 
+summary(m0)
+```
+under “Fixed effects” we have the “(Intercept)”, 3.8, which is the grand mean (γ00) and tells us that over all the time points and individuals the average logODA is 5.845
+
+under “Random effects” everything that varies by “Country” represents between variation. In this case the between variation for the intercept (ξ0i) is 4.487.In other words, between-subject variability is 4.487
+
+under “Random effects” the “Residual” coefficient represents within variation. In this case the within variation for the intercept (ϵij) is 5.544.
+
+## if we need mixed effects 
+
+InterClass Coefficient (ICC) = 0.4. 
+use ICC to decide if we need the multilevel model. If the ICC is greater than 0.1, the responses are more similar within a cluster (Schumacker and Lomax 2004, 196). In this case, the multilevel regression is preferred. 
+
+
+```{r}
+jtools::summ(m0)
+```
+
+
+### Variance components
+Variance components can be tested using an ANOVA-like table that can be derived using the ranova function in the lmer test.
+```{r}
+ranova(m0)
+```
+The small p-value suggests evidence of between-individual heterogeneity, which support evidence for choosing a mixed-effects model instead of a only fixed-effects model.
+
+## time effects
+
+```{r}
+m1 <- lmer(log_OFALL~ factor(Year) + (1 | Country), data = df, REML = FALSE)
+summary(m1)
+```
+
+# Fixed effect models
+ Oneway (individual) effect within model , country
+ 
+## trade
+
+```{r}
+fix_trade1 <- plm(log_OFALL ~ lag_Imp.Percent.CN + lag_Exp.Percent.CN + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict + lag_log_OECD + lag_log_ADB_Loans, data = df, index = c("Country", "Year"), model = "within", effect="individual") # model="within" means fixed effects for the entity variable, country
+summary(fix_trade1)
+```
+##dispute
+
+```{r}
+fix_disp1 <- plm(log_OFALL ~ lag_Dispute + lag_Resolution + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict+ lag_log_OECD + lag_log_ADB_Loans, data = df, index = c("Country", "Year"), model = "within", effect="individual") 
+summary(fix_disp1 ) # resolution significance
+```
+## institutions
+```{r}
+fix_inst1 <- plm(log_OFALL ~  lag_BRI_Member + lag_AIIB_Member + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict+ lag_log_OECD + lag_log_ADB_Loans, data = df, index = c("Country", "Year"), model = "within", effect="individual") # model="within" means fixed effects for the entity variable, country
+summary(fix_inst1)
+```
+
+
+# mixed effects mdoel (multilvel modeling)
+
+# trade
+
+##  model with random intercepts
+
+intercepts vary by country
+
+The simplest version of a mixed effects model uses random intercepts. In this case, the random effect allows each group (or player, in this case) to have a different intercept in the model, while the effects of the other variables remain fixed. 
+
+### only level 1 predictors
+```{r}
+trade_int_1 <- lmer(log_OFALL ~ lag_Imp.Percent.CN + lag_Exp.Percent.CN + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict +  lag_log_OECD + lag_log_ADB_Loans + (1 | Country), data = df, REML = FALSE )
+summary(trade_int_1)
+```
+
+To view the individual random effects, use the ranef function from the lme4 package. 
+```{r}
+ranef(trade_int_1)
+```
+
+```{r}
+#Random effects variance 
+VarCorr(trade_int_1)
+```
+
+```{r}
+# Model diagnostics
+plot(trade_int_1)
+```
+
+### add level 2 predictors, SCS_Border and SCS_Features
+```{r}
+trade_int_2 <- lmer(log_OFALL ~ lag_Imp.Percent.CN + lag_Exp.Percent.CN + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict + lag_log_OECD + lag_log_ADB_Loans + SCS_Border + SCS_Features +  (1 | Country), data = df, REML = FALSE )
+summary(trade_int_2)
+```
+
+
+### add year as random effects?
+
+```{r}
+trade_int_3 <- lmer(log_OFALL ~ lag_Imp.Percent.CN + lag_Exp.Percent.CN + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict +  lag_log_OECD + lag_log_ADB_Loans + SCS_Border + SCS_Features + (1 | Country) + (1 | Year), data = df, REML = FALSE )
+summary(trade_int_2)
+```
+
+## mixed-effects model with random intercepts + random slopes
+
+formula: 1 + x + (1 + x | g), Correlated random intercept and slope
+but have singularity issues, which indicates overfitting 
+
+```{r}
+
+trade_slop_1 <- lmer(log_OFALL ~ lag_Imp.Percent.CN + lag_Exp.Percent.CN + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict +  lag_log_OECD + lag_log_ADB_Loans + (1 + lag_Imp.Percent.CN + lag_Exp.Percent.CN | Country), data = df, REML = FALSE)
+summary(trade_slop_1) # indicate overfitting
+
+help('isSingular')
+```
+```{r}
+isSingular(trade_slop_1)
+```
+
+```{r}
+# only import
+trade_slop_1 <- lmer(log_OFALL ~ lag_Imp.Percent.CN  + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict +  lag_log_OECD + lag_log_ADB_Loans + (1 + lag_Imp.Percent.CN | Country), data = df, REML = FALSE )
+summary(trade_slop_1)
+```
+
+```{r}
+# only export
+trade_slop_1 <- lmer(log_OFALL~ lag_Exp.Percent.CN + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict +  lag_log_OECD + lag_log_ADB_Loans + (1 + lag_Exp.Percent.CN | Country), data = df, REML = FALSE )
+summary(trade_slop_1)
+
+# isSingular(trade_slop_1)
+```
+
+### compare models: intercept model 1 is better
+cannot use random slope model because of singularity issues.
+Both p values are greater than 0.05. not much difference. we don't need to add level-2 predictors and add year as random effects. 
+```{r}
+#anova(trade_int_1,trade_int_2)
+```
+
+```{r}
+#anova(trade_int_1,trade_int_3)
+```
+
+```{r}
+#anova(trade_int_1,trade_slop_1)
+```
+### RD vs. OLS
+OLS better
+```{r}
+#anova(trade_int_1,pool_trade)
+```
+### RD vs. FE
+seems FE is better
+```{r}
+#anova(trade_int_1,fix_trade1)
+AIC(trade_int_1,fix_trade1)
+BIC(trade_int_1,fix_trade1)
+```
+### run Hausman Test RD VS. FE 
+#### RD is better
+
+The null hypothesis of the Hausman test is that the random-effects estimator is consistent and efficient, and hence preferable. If the p-value is small (typically < 0.05), you reject the null, suggesting that the fixed-effects model is more appropriate because country-specific effects are likely correlated with predictors.
+
+
+####only level 1 predictors
+```{r}
+# Fixed Effects Model
+fe_model <- plm(log_OFALL ~ lag_Imp.Percent.CN + lag_Exp.Percent.CN + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict +  lag_log_OECD + lag_log_ADB_Loans + SCS_Border, data = df, model = "within")
+
+summary(fe_model)
+
+# Random Effects Model
+#re_model <- plm(log_OFALL ~ lag_Imp.Percent.CN + lag_Exp.Percent.CN + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict + lag_log_OECD + lag_log_ADB_Loans, data = df, model = "random")
+
+#hausman_test <- phtest(fe_model, re_model)
+#print(hausman_test)
+
+```
+####level 1 + 2 predictors
+
+only 9 individuals, so the number of IVs cannot be greater than 7 
+degree of freedom?
+
+cannot add  lag_log_OECD + lag_log_ADB_Loans due to limited number in fixed effects model
+
+not need to use level 2 predictors for random effects
+
+SCS_Border
+
+SCS_Features
+
+
+
+### conclusion: choose simple intercept 1 model
+
+```{r}
+trade_int_1 <- lmer(log_OFALL ~ lag_Imp.Percent.CN + lag_Exp.Percent.CN + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict +  lag_log_OECD + lag_log_ADB_Loans + (1 | Country), data = df, REML = FALSE )
+summary(trade_int_1)
+```
+
+# disputes
+
+### only level 1 predictors
+```{r}
+disp_int_1 <- lmer(log_OFALL ~ lag_Dispute + lag_Resolution + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict +  lag_log_OECD + lag_log_ADB_Loans + (1 | Country), data = df, REML = FALSE )
+summary(disp_int_1)
+```
+
+### add level 2 predictors, SCS_Border and SCS_Features
+```{r}
+disp_int_2 <- lmer(log_OFALL ~ lag_Dispute + lag_Resolution + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict +  lag_log_OECD + lag_log_ADB_Loans + SCS_Border + SCS_Features + (1 | Country), data = df, REML = FALSE )
+summary(disp_int_2)
+```
+
+### add year as random effects
+
+```{r}
+disp_int_3 <- lmer(log_OFALL ~ lag_Dispute + lag_Resolution + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict +  lag_log_OECD + lag_log_ADB_Loans + SCS_Border + SCS_Features + (1 | Country) + (1 | Year), data = df, REML = FALSE )
+summary(disp_int_2)  
+
+```
+
+## mixed-effects model with random intercepts + random slopes
+have singularity issues, which indicates overfitting 
+
+```{r}
+disp_slop_1 <- lmer(log_OFALL ~ lag_Dispute + lag_Resolution + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict + lag_log_OECD + lag_log_ADB_Loans+ SCS_Border + SCS_Features + (1 + lag_Dispute + lag_Resolution | Country), data = df, REML = FALSE)
+summary(disp_slop_1) #  # is singular, which indicates overfitting
+```
+
+
+```{r}
+isSingular(disp_slop_1)
+VarCorr(disp_slop_1)
+```
+
+
+### compare models: intercept model 1 is better
+cannot use random slope model because of singularity issues.
+Both p values are greater than 0.05. not much difference. we don't need to add level-2 predictors and add year as random effects. 
+```{r}
+#anova(disp_int_1,disp_int_2)
+```
+```{r}
+#anova(disp_int_1,disp_int_3)
+```
+```{r}
+#anova(disp_int_1,disp_slop_1)
+```
+### RD vs. OLS
+
+seems OLS is better
+```{r}
+#anova(disp_int_1,pool_disp)
+```
+### RD vs. FE
+seems FE is better
+
+```{r}
+#anova(disp_int_1,fix_disp1)
+AIC(disp_int_1,fix_disp1)
+BIC(disp_int_1,fix_disp1)
+```
+
+# institutional influence 
+
+### only level 1 predictors
+```{r}
+inst_int_1 <- lmer(log_OFALL ~ lag_BRI_Member + lag_AIIB_Member + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict +  lag_log_OECD + lag_log_ADB_Loans + (1 | Country), data = df, REML = FALSE )
+summary(inst_int_1)
+```
+
+### add level 2 predictors, SCS_Border and SCS_Features
+```{r}
+inst_int_2 <- lmer(log_OFALL ~ lag_BRI_Member + lag_AIIB_Member + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict + lag_log_OECD + lag_log_ADB_Loans +SCS_Border + SCS_Features + (1 | Country) , data = df, REML = FALSE )
+summary(inst_int_2)
+```
+
+### add year as random effects
+
+note: boundary (singular) fit: see help('isSingular')
+
+```{r}
+inst_int_3 <- lmer(log_OFALL ~ lag_BRI_Member + lag_AIIB_Member + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict + lag_log_OECD + lag_log_ADB_Loans +SCS_Border + SCS_Features + (1 | Country) + (1 | Year), data = df, REML = FALSE )
+summary(inst_int_3)  # is singular
+help('isSingular')
+```
+
+## mixed-effects random intercepts + random slopes
+singular
+```{r}
+inst_slop_1 <- lmer(log_OFALL ~ lag_BRI_Member + lag_AIIB_Member + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict + lag_log_OECD + lag_log_ADB_Loans + SCS_Border + SCS_Features + (1 + lag_AIIB_Member + lag_BRI_Member | Country), data = df, REML = FALSE)
+summary(inst_slop_1)
+```
+
+### compare models: random intercept 1 is better
+
+the third comparison means random slope and intercept is better
+```{r}
+#anova(inst_int_1,inst_int_2)
+```
+
+```{r}
+#anova(inst_int_1,inst_int_3)
+```
+
+```{r}
+#anova(inst_int_1,inst_slop_1)
+```
+### RD vs. OLS
+```{r}
+#anova(inst_int_1,pool_ins1)
+```
+### RD vs. FE
+seems FE is better
+
+```{r}
+#anova(inst_int_1,fix_inst1)
+AIC(inst_int_1,fix_inst1)
+BIC(inst_int_1,fix_inst1)
+```
+
+# all tables
+## conclusion
+Some random slope models failed to converge or have singularity issues, so don't include in the result table. And random intercept 1 model (only level 1 predictors) is better than random intercept 2 model (add level 2 predictors)
+ 
+### table rand slope 1&2, OLS
+
+## trade
+The marginal R-squared considers only the variance of the fixed effects, while the conditional R-squared takes both the fixed and random effects into account.
+
+rand slop1 model is better
+
+note just added year as random effects. 
+
+
+```{r}
+pl <- c(
+  `(Intercept)` = "Intercept",
+  lag_Imp.Percent.CN = "Percent of Imports (lag)",
+  lag_Exp.Percent.CN = "Percent of Exports (lag)",
+  lag_UNSC = "UNSC (lag)",
+  lag_log_GDPpc = "GDP per capita (lag, log)",
+  lag_log_Pop = "Population (lag, log)",
+  lag_Civil_Conflict = "Political Stability (lag)",
+  lag_log_OECD = "OECD DAC (lag, log)",
+  lag_log_ADB_Loans = "ADB Loans (lag, log)",
+  SCS_Border ="SCS Border", 
+  SCS_Features ="SCS Features"
+)
+
+tab_model(pool_trade, trade_int_1, trade_int_2, trade_int_3, 
+          pred.labels = pl, 
+          show.ci = FALSE,
+          p.style = "stars",
+          show.icc = TRUE,
+          show.re.var = TRUE,
+          show.aic = TRUE,
+          #show.aicc = TRUE,
+          show.ngroups = TRUE,
+          #show.loglik = TRUE,
+          show.obs = TRUE,
+          dv.labels = c("OLS (baseline)", "Model1", "Model2", "Model3"))
+#browseVignettes("sjPlot")
+```
+
+          
+## dispute
+
+```{r}
+pl <- c(
+  `(Intercept)` = "Intercept",
+  lag_Dispute = "Dispute (lag)",
+  lag_Resolution = "Resolution (lag)",
+  lag_UNSC = "UNSC (lag)",
+  lag_log_GDPpc = "GDP per capita (lag, log)",
+  lag_log_Pop = "Population (lag, log)",
+  lag_Civil_Conflict = "Political Stability (lag)",
+  lag_log_OECD = "OECD DAC (lag, log)",
+  lag_log_ADB_Loans = "ADB Loans (lag, log)",
+  SCS_Border ="SCS Border", 
+  SCS_Features ="SCS Features"
+)
+tab_model(pool_disp, disp_int_1, disp_int_2, disp_int_3,
+          pred.labels = pl, 
+          show.ci = FALSE,
+          p.style = "stars",
+          show.icc = TRUE,
+          show.re.var = TRUE,
+          show.aic = TRUE,
+          #show.aicc = TRUE,
+          show.ngroups = TRUE,
+          #show.loglik = TRUE,
+          show.obs = TRUE,
+          dv.labels = c("OLS (baseline)", "Model1", "Model2", "Model3"))
+```
+
+
+## influence 1 BRI & AIIB
+
+```{r}
+pl <- c(
+  `(Intercept)` = "Intercept",
+  lag_BRI_Member = "BRI member (lag)",
+  lag_AIIB_Member = "AIIB member (lag)",
+  lag_UNSC = "UNSC (lag)",
+  lag_log_GDPpc = "GDP per capita (lag, log)",
+  lag_log_Pop = "Population (lag, log)",
+  lag_Civil_Conflict = "Political Stability (lag)",
+  lag_log_OECD = "OECD DAC (lag, log)",
+  lag_log_ADB_Loans = "ADB Loans (lag, log)",
+  SCS_Border ="SCS Border", 
+  SCS_Features ="SCS Features"
+)
+tab_model(pool_ins1, inst_int_1, inst_int_2, inst_int_3, 
+          pred.labels = pl, 
+          show.ci = FALSE,
+          p.style = "stars",
+          show.icc = TRUE,
+          show.re.var = TRUE,
+          #show.aic = TRUE,
+          show.aicc = TRUE,
+          show.ngroups = TRUE,
+          #show.loglik = TRUE,
+          show.obs = TRUE,
+          dv.labels = c("OLS (baseline)", "Model1", "Model2", "Model3"))
+```
+
+
+#coefficient plots
+
+## trade
+
+```{r}
+# Extracting coefficients
+coef1 <- as.data.frame(summary(trade_int_1)$coefficients)
+coef2 <- as.data.frame(summary(trade_int_2)$coefficients)
+coef3 <- as.data.frame(summary(trade_int_3)$coefficients)
+
+
+# Adding variable names and model names
+coef1$variable <- rownames(coef1)
+coef1$model <- "Model 1"
+
+coef2$variable <- rownames(coef2)
+coef2$model <- "Model 2"
+
+coef3$variable <- rownames(coef3)
+coef3$model <- "Model 3"
+
+# Combining into one data frame
+coef_combined <- rbind(coef1, coef2, coef3)
+
+# Adding a size attribute for specific variables
+coef_combined$size <- ifelse(coef_combined$variable %in% c("lag_Imp.Percent.CN", "lag_Exp.Percent.CN"), 4, 2)
+
+# Specifying the order of variables
+ordered_variables <- rev(c("lag_Imp.Percent.CN", "lag_Exp.Percent.CN", "lag_UNSC","lag_log_GDPpc",  
+                       "lag_log_Pop", "lag_Civil_Conflict", "lag_log_OECD", "lag_log_ADB_Loans", 
+                       "SCS_Border", "SCS_Features", "(Intercept)"))  # The order is reversed here
+
+names_to_change <- c(
+  "(Intercept)" = "Intercept",
+  "lag_Imp.Percent.CN" = "Percent of Imports (lag)",
+  "lag_Exp.Percent.CN" = "Percent of Exports (lag)",
+  "lag_UNSC" = "UNSC (lag)",
+  "lag_log_GDPpc" = "GDP per capita (lag, log)",
+  "lag_log_Pop" = "Population (lag, log)",
+  "lag_Civil_Conflict" = "Political Stability (lag)",
+  "lag_log_OECD" = "OECD DAC (lag, log)",
+  "lag_log_ADB_Loans" = "ADB Loans (lag, log)",
+  "SCS_Border" ="SCS Border", 
+  "SCS_Features" ="SCS Features"
+)
+
+
+# Changing the order of factor levels
+coef_combined$variable <- factor(coef_combined$variable, levels = ordered_variables)
+
+
+# Ensuring there are no NAs in the 'variable' column
+coef_combined <- coef_combined %>%
+  filter(!is.na(variable))
+
+names_to_change <- c(
+  "(Intercept)" = "Intercept",
+  "lag_Imp.Percent.CN" = "Percent of Imports (lag)***",
+  "lag_Exp.Percent.CN" = "Percent of Exports (lag)",
+  "lag_UNSC" = "UNSC (lag)",
+  "lag_log_GDPpc" = "GDP per capita (lag, log)",
+  "lag_log_Pop" = "Population (lag, log)",
+  "lag_Civil_Conflict" = "Political Stability (lag)",
+  "lag_log_OECD" = "OECD DAC (lag, log)",
+  "lag_log_ADB_Loans" = "ADB Loans (lag, log)",
+  "SCS_Border" ="SCS Border", 
+  "SCS_Features" ="SCS Features"
+)
+
+# Creating the plot
+ggplot(coef_combined, aes(y = variable, x = Estimate, color = model)) +
+  geom_point(aes(size = size), position = position_dodge(width = 0.6)) +
+  geom_errorbar(aes(xmin = Estimate - `Std. Error`, xmax = Estimate + `Std. Error`), 
+                position = position_dodge(width = 0.6), width = 0.2) +
+  theme_minimal() +
+  scale_size_identity() +
+  scale_y_discrete(labels = names_to_change) +
+  labs(y = "Variable", x = "Coefficient", color = "Trade Model") +
+  geom_vline(xintercept = 0, linetype = "dashed")+
+  theme(
+    text = element_text(size = 15), # Change overall text size
+    axis.title = element_text(size = 17), # Change axis title text size
+    axis.text = element_text(size = 15), # Change axis text size
+    legend.title = element_text(size = 16), # Change legend title text size
+    legend.text = element_text(size = 14)  # Change legend text size
+  )
+
+```
+
+## Dipsute
+
+```{r}
+# Extracting coefficients
+coef1 <- as.data.frame(summary(disp_int_1)$coefficients)
+coef2 <- as.data.frame(summary(disp_int_2)$coefficients)
+coef3 <- as.data.frame(summary(disp_int_3)$coefficients)
+
+
+# Adding variable names and model names
+coef1$variable <- rownames(coef1)
+coef1$model <- "Model 1"
+
+coef2$variable <- rownames(coef2)
+coef2$model <- "Model 2"
+
+coef3$variable <- rownames(coef3)
+coef3$model <- "Model 3"
+
+# Combining into one data frame
+coef_combined <- rbind(coef1, coef2, coef3)
+
+# Specifying the order of variables
+ordered_variables <- rev(c("lag_Dispute", "lag_Resolution", "lag_UNSC","lag_log_GDPpc",  
+                       "lag_log_Pop", "lag_Civil_Conflict", "lag_log_OECD", "lag_log_ADB_Loans", 
+                       "SCS_Border", "SCS_Features", "(Intercept)"))  # The order is reversed here
+
+names_to_change <- c(
+  "(Intercept)" = "Intercept",
+  "lag_Dispute" = "Dispute (lag)",
+  "lag_Resolution" = "Resolution (lag)**",
+  "lag_UNSC" = "UNSC (lag)",
+  "lag_log_GDPpc" = "GDP per capita (lag, log)",
+  "lag_log_Pop" = "Population (lag, log)",
+  "lag_Civil_Conflict" = "Political Stability (lag)",
+  "lag_log_OECD" = "OECD DAC (lag, log)",
+  "lag_log_ADB_Loans" = "ADB Loans (lag, log)",
+  "SCS_Border" ="SCS Border", 
+  "SCS_Features" ="SCS Features"
+)
+
+# Changing the order of factor levels
+coef_combined$variable <- factor(coef_combined$variable, levels = ordered_variables)
+
+
+# Adding a size attribute for specific variables
+coef_combined$size <- ifelse(coef_combined$variable %in% c("lag_Dispute", "lag_Resolution"), 4, 2)
+
+# Ensuring there are no NAs in the 'variable' column
+coef_combined <- coef_combined %>%
+  filter(!is.na(variable))
+
+# Creating the plot
+ggplot(coef_combined, aes(y = variable, x = Estimate, color = model)) +
+  geom_point(aes(size = size), position = position_dodge(width = 0.6)) +
+  geom_errorbar(aes(xmin = Estimate - `Std. Error`, xmax = Estimate + `Std. Error`), 
+                position = position_dodge(width = 0.6), width = 0.2) +
+  theme_minimal() +
+  scale_size_identity() +
+  scale_y_discrete(labels = names_to_change) +
+  labs(y = "Variable", x = "Coefficient", color = "Dispute Model") +
+  geom_vline(xintercept = 0, linetype = "dashed")+
+  theme(
+    text = element_text(size = 15), # Change overall text size
+    axis.title = element_text(size = 17), # Change axis title text size
+    axis.text = element_text(size = 15), # Change axis text size
+    legend.title = element_text(size = 16), # Change legend title text size
+    legend.text = element_text(size = 14)  # Change legend text size
+  )
+
+```
+
+
+## Institution
+
+```{r}
+# Extracting coefficients
+coef1 <- as.data.frame(summary(inst_int_1)$coefficients)
+coef2 <- as.data.frame(summary(inst_int_2)$coefficients)
+coef3 <- as.data.frame(summary(inst_int_3)$coefficients)
+
+# Adding variable names and model names
+coef1$variable <- rownames(coef1)
+coef1$model <- "Model 1"
+
+coef2$variable <- rownames(coef2)
+coef2$model <- "Model 2"
+
+coef3$variable <- rownames(coef3)
+coef3$model <- "Model 3"
+
+# Combining into one data frame
+coef_combined <- rbind(coef1, coef2, coef3)
+
+# Specifying the order of variables
+ordered_variables <- rev(c("lag_BRI_Member", "lag_AIIB_Member", "lag_UNSC","lag_log_GDPpc",  
+                       "lag_log_Pop", "lag_Civil_Conflict", "lag_log_OECD", "lag_log_ADB_Loans", 
+                       "SCS_Border", "SCS_Features", "(Intercept)"))  # The order is reversed here
+
+names_to_change <- c(
+  "(Intercept)" = "Intercept",
+  "lag_BRI_Member" = "BRI member (lag)",
+  "lag_AIIB_Member" = "AIIB member (lag)",
+  "lag_UNSC" = "UNSC (lag)",
+  "lag_log_GDPpc" = "GDP per capita (lag, log)",
+  "lag_log_Pop" = "Population (lag, log)",
+  "lag_Civil_Conflict" = "Political Stability (lag)",
+  "lag_log_OECD" = "OECD DAC (lag, log)",
+  "lag_log_ADB_Loans" = "ADB Loans (lag, log)",
+  "SCS_Border" ="SCS Border", 
+  "SCS_Features" ="SCS Features"
+)
+
+# Changing the order of factor levels
+coef_combined$variable <- factor(coef_combined$variable, levels = ordered_variables)
+
+
+# Adding a size attribute for specific variables
+coef_combined$size <- ifelse(coef_combined$variable %in% c("lag_BRI_Member", "lag_AIIB_Member"), 4, 2)
+
+# Ensuring there are no NAs in the 'variable' column
+coef_combined <- coef_combined %>%
+  filter(!is.na(variable))
+
+# Creating the plot
+ggplot(coef_combined, aes(y = variable, x = Estimate, color = model)) +
+  geom_point(aes(size = size), position = position_dodge(width = 0.6)) +
+  geom_errorbar(aes(xmin = Estimate - `Std. Error`, xmax = Estimate + `Std. Error`), 
+                position = position_dodge(width = 0.6), width = 0.2) +
+  theme_minimal() +
+  scale_size_identity() +
+  scale_y_discrete(labels = names_to_change) +
+  labs(y = "Variable", x = "Coefficient", color = "Institution Model") +
+  geom_vline(xintercept = 0, linetype = "dashed")+
+  theme(
+    text = element_text(size = 15), # Change overall text size
+    axis.title = element_text(size = 17), # Change axis title text size
+    axis.text = element_text(size = 15), # Change axis text size
+    legend.title = element_text(size = 16), # Change legend title text size
+    legend.text = element_text(size = 14)  # Change legend text size
+  )
+
+```
+
+# individual country for case study 
+##cambodia
+```{r}
+#subset
+df_Camb <- filter(.data = df, Country == "Cambodia")
+# trade
+mcamb1 <-lm(log_OFALL  ~lag_Imp.Percent.CN + lag_Exp.Percent.CN + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict + lag_log_OECD + lag_log_ADB_Loans +SCS_Border + SCS_Features,  data=df_Camb)
+# resolution
+mcamb2 <-lm(log_OFALL  ~lag_Dispute + lag_Resolution + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict + lag_log_OECD + lag_log_ADB_Loans +SCS_Border + SCS_Features,  data=df_Camb)
+# institutions
+mcamb3 <-lm(log_OFALL ~ lag_BRI_Member + lag_AIIB_Member + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict + lag_log_OECD + lag_log_ADB_Loans +SCS_Border + SCS_Features,  data=df_Camb)
+
+```
+
+```{r}
+stargazer(mcamb1, mcamb2, mcamb3,
+          title="Cambodia", 
+          column.labels=c("Trade", "Disputes", "Institutions"), 
+          df=FALSE, digits=3)
+```
+
+
+## philippines
+
+```{r}
+#subset
+df_ph <- filter(.data = df, Country == "Philippines")
+# trade
+mph1 <-lm(log_OFALL ~lag_Imp.Percent.CN + lag_Exp.Percent.CN + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict + lag_log_OECD + lag_log_ADB_Loans +SCS_Border + SCS_Features,  data=df_ph)
+# resolution
+mph2 <-lm(log_OFALL ~lag_Dispute + lag_Resolution + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict + lag_log_OECD + lag_log_ADB_Loans +SCS_Border + SCS_Features,  data=df_ph)
+# institutions
+mph3 <-lm(log_OFALL ~  lag_BRI_Member + lag_AIIB_Member + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict + lag_log_OECD + lag_log_ADB_Loans +SCS_Border + SCS_Features,  data=df_ph)
+
+```
+
+```{r}
+stargazer(mph1, mph2, mph3,
+          title="Philippines", 
+          column.labels=c("Trade", "Disputes", "Institutions"), 
+          df=FALSE, digits=3)
+```
+
+
+## indonedia
+
+```{r}
+#subset
+df_ind <- filter(.data = df, Country == "Indonesia")
+# trade
+mind1 <-lm(log_OFALL ~lag_Imp.Percent.CN + lag_Exp.Percent.CN + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict + lag_log_OECD + lag_log_ADB_Loans +SCS_Border + SCS_Features,  data=df_ind)
+# resolution
+mind2 <-lm(log_OFALL ~lag_Dispute + lag_Resolution + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict + lag_log_OECD + lag_log_ADB_Loans +SCS_Border + SCS_Features,  data=df_ind)
+# institutions
+mind3 <-lm(log_OFALL ~  lag_BRI_Member + lag_AIIB_Member + lag_UNSC + lag_log_GDPpc + lag_log_Pop + lag_Civil_Conflict + lag_log_OECD + lag_log_ADB_Loans +SCS_Border + SCS_Features,  data=df_ind)
+
+```
+
+```{r}
+stargazer(mind1, mind2, mind3, 
+          title="Indonesia", 
+          column.labels=c("Trade", "Disputes", "Institutions"), 
+          df=FALSE, digits=3)
+```
